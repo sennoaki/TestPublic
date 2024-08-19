@@ -19,6 +19,16 @@ struct FAIAssist_DungeonGridNode
 	int32 mGridSpaceIndex = INDEX_NONE;
 	int32 mRoadIndex = INDEX_NONE;
 	EAIAssist_DungeonGridState mState = EAIAssist_DungeonGridState::Invalid;
+	union WallFlagUnion {
+		uint8 mFlag = 0;
+		struct {
+			uint8 mbFront : 1;
+			uint8 mbBack : 1;
+			uint8 mbRight : 1;
+			uint8 mbLeft : 1;
+		};
+	};
+	WallFlagUnion mWallFlag;
 };
 struct FAIAssist_DungeonGridNodeIndex
 {
@@ -69,6 +79,7 @@ class AIASSIST_API AAIAssist_DungeonMaker : public AActor
 public:	
 	// Sets default values for this actor's properties
 	AAIAssist_DungeonMaker();
+	virtual void Tick(float DeltaTime) override;
 
 protected:
 	// Called when the game starts or when spawned
@@ -91,12 +102,12 @@ protected:
 	void SetupRoadConnectDirectionY(const FAIAssist_DungeonGridNode& InBaseGridNode, const int32 InOffsetIndex);
 	void SetupRoadList();
 	void SetupRoadList(const int32 InBaseGridNodeUID);
+	void SetupGridWallFlag();
+	void SetupGridWallFlag(FAIAssist_DungeonGridNode& InGridNode);
+	void CreateStage();
+	//void CreateWall(const FVector& InGridPos, );
+	bool IsFloorGrid(const int32 InX, const int32 InY) const;
 	bool CheckAddRoadList(FAIAssist_DungeonRoad& OutRoad, const int32 InCheckIndexX, const int32 InCheckIndexY);
-	void GenerateRoomActor();
-	void GenerateRoomWallX(const FAIAssist_DungeonRoom& InRoom, bool bInPlusDirection);
-	void GenerateRoomWallY(const FAIAssist_DungeonRoom& InRoom, bool bInPlusDirection);
-	void GenerateRoadActor();
-	void GenerateRoadWall(const int32 InGridNodeUID, const bool bInEdgeRoadNode);
 	void CreateFloorActor(const FTransform& InTransform);
 	void CreateWallActor(const FTransform& InTransform);
 
@@ -104,25 +115,35 @@ protected:
 	bool CalcGridNodeXY(int32& OutX, int32& OutY, const int32 InUID) const;
 	FAIAssist_DungeonGridNode* GetGridNode(const int32 InUID);
 	FAIAssist_DungeonGridNode* GetGridNode(const int32 InX, const int32 InY);
+	const FAIAssist_DungeonGridNode* GetGridNode(const int32 InX, const int32 InY) const;
+	FVector CalcDungeonExtentV() const;
+	FVector CalcDungeonBeginEdgePos() const;
+	FVector CalcGridEdgePos(const int32 InX, const int32 InY) const;
+	FVector CalcGridCenterPos(const int32 InX, const int32 InY) const;
 
 public:	
-	// Called every frame
-	virtual void Tick(float DeltaTime) override;
-
 	UPROPERTY(EditInstanceOnly, Category = AIAssist_DungeonMaker)
 	float mGridNodeLength = 200.f;
 	UPROPERTY(EditInstanceOnly, Category = AIAssist_DungeonMaker)
 	float mWallLength = 400.f;
+	//全体グリッド数x
 	UPROPERTY(EditInstanceOnly, Category = AIAssist_DungeonMaker, meta = (ClampMin = "1", UIMin = "1", ClampMax = "256", UIMax = "256"))
 	int32 mGridNodeXNum = 100;
+	//全体グリッド数y
 	UPROPERTY(EditInstanceOnly, Category = AIAssist_DungeonMaker, meta = (ClampMin = "1", UIMin = "1", ClampMax = "256", UIMax = "256"))
 	int32 mGridNodeYNum = 100;
+	//空間分割時の最小グリッド数
 	UPROPERTY(EditInstanceOnly, Category = AIAssist_DungeonMaker, meta = (ClampMin = "1", UIMin = "1", ClampMax = "256", UIMax = "256"))
 	int32 mGridSpaceLenMin = 6;
+	//空間分割時の最大グリッド数
 	UPROPERTY(EditInstanceOnly, Category = AIAssist_DungeonMaker, meta = (ClampMin = "1", UIMin = "1", ClampMax = "256", UIMax = "256"))
 	int32 mGridSpaceLenMax = 20;
+	//空間に部屋生成時の最小グリッド数
 	UPROPERTY(EditInstanceOnly, Category = AIAssist_DungeonMaker, meta = (ClampMin = "1", UIMin = "1", ClampMax = "256", UIMax = "256"))
 	int32 mGridRoomLenMin = 4;
+	//空間に部屋生成時の空間境界から離す最小グリッド数
+	UPROPERTY(EditInstanceOnly, Category = AIAssist_DungeonMaker, meta = (ClampMin = "1", UIMin = "1", ClampMax = "256", UIMax = "256"))
+	int32 mGridRoomSpaceOffsetMin = 1;
 	//基点が中心にある1辺が100cmの床用Actor
 	UPROPERTY(EditInstanceOnly, Category = AIAssist_DungeonMaker)
 	TSoftClassPtr<AActor> mFloorActorClass;
@@ -147,7 +168,8 @@ protected:
 	void DebugDraw(UCanvas* InCanvas, class APlayerController* InPlayerController);
 	void DebugDraw2DMap(UCanvas* InCanvas);
 	void DebugDraw3DMap(UCanvas* InCanvas);
-	void DrawCanvasQuadrangle(UCanvas* InCanvas, const FVector2D& InCenterPos, const FVector2D& InExtent, const FLinearColor InColor);
+	void DebugDrawCanvasQuadrangle(UCanvas* InCanvas, const FVector2D& InCenterPos, const FVector2D& InExtent, const FLinearColor InColor);
+	FString DebugGetGridStateString(const EAIAssist_DungeonGridState InState) const;
 private:
 	FDelegateHandle	mDebugDrawHandle;
 	bool mbDebugDraw2DGrid = false;

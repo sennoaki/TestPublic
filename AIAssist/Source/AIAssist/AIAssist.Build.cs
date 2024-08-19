@@ -39,7 +39,7 @@ public class AIAssist : ModuleRules
 				"Slate",
 				"SlateCore",
 				"RenderCore",
-                "CSDebug"
+				"AIModule"
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);
@@ -51,5 +51,17 @@ public class AIAssist : ModuleRules
 				// ... add any modules that your module loads dynamically here ...
 			}
 			);
-	}
+
+        if (Target.Configuration != UnrealTargetConfiguration.Shipping)
+        {
+			PrivateDependencyModuleNames.AddRange(
+            new string[]
+            {
+                "CSDebug"
+			}
+            );
+
+            Definitions.Add("USE_CSDEBUG=1");
+        }
+    }
 }

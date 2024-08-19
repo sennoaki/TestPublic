@@ -9,11 +9,22 @@
 #include "CanvasItem.h"
 #include "RenderUtils.h"
 
+#if USE_CSDEBUG
+#include "DebugInfoWindow/CSDebugInfoWindowText.h"
+#endif
+
 // Sets default values
 AAIAssist_DungeonMaker::AAIAssist_DungeonMaker()
 {
  	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
 	PrimaryActorTick.bCanEverTick = true;
+
+}
+
+// Called every frame
+void AAIAssist_DungeonMaker::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
 
 }
 
@@ -50,6 +61,7 @@ void AAIAssist_DungeonMaker::GenerateDungeon()
 	SetupRoadGridSpace();
 	SetupRoadConnect();
 	SetupRoadList();
+	SetupGridWallFlag();
 
 	for (AActor* Actor : mStageActorList)
 	{
@@ -57,8 +69,7 @@ void AAIAssist_DungeonMaker::GenerateDungeon()
 	}
 	mStageActorList.Empty();
 
-	GenerateRoomActor();
-	GenerateRoadActor();
+	CreateStage();
 }
 
 //GridNodeListを準備
@@ -83,34 +94,50 @@ void AAIAssist_DungeonMaker::GenerateGridNodeList()
 //GridNodeを大きく分割してGridSpace単位を作る
 void AAIAssist_DungeonMaker::GenerateGridSpace()
 {
+#if !UE_BUILD_SHIPPING
+	FString DebugLogString(TEXT("AAIAssist_DungeonMaker::GenerateGridSpace()\n"));
+#endif
+
 	mGridSpaceList.Empty();
 	FAIAssist_DungeonGridNodeIndex BeginIndex(0, 0);
-	FAIAssist_DungeonGridNodeIndex EndIndex(mGridNodeXNum, mGridNodeYNum);
+	FAIAssist_DungeonGridNodeIndex EndIndex(mGridNodeXNum-1, mGridNodeYNum-1);
 	mGridSpaceList.Add(FAIAssist_DungeonGridSpace(BeginIndex, EndIndex));
 
+	const int32 NeedSpaceLen = (mGridRoomSpaceOffsetMin * 2) + mGridRoomLenMin;
+	int32 PossibleSplitSpaceLen = FMath::Max(mGridSpaceLenMin * 2, mGridSpaceLenMin + mGridSpaceLenMax);
+	PossibleSplitSpaceLen = FMath::Max(PossibleSplitSpaceLen, NeedSpaceLen);
 	for (int32 i = 0; i < mGridSpaceList.Num(); )
 	{
 		const FAIAssist_DungeonGridSpace& GridSpace = mGridSpaceList[i];
 		const int32 GridSpaceLenX = GridSpace.mEndIndex.mX - GridSpace.mBeginIndex.mX;
 		const int32 GridSpaceLenY = GridSpace.mEndIndex.mY - GridSpace.mBeginIndex.mY;
-		if (GridSpaceLenX < mGridSpaceLenMax
-			&& GridSpaceLenY < mGridSpaceLenMax)
+		if (GridSpaceLenX < PossibleSplitSpaceLen
+			&& GridSpaceLenY < PossibleSplitSpaceLen)
 		{
 			++i;
 			continue;
 		}
 
-		//大きい方で分割
 		FAIAssist_DungeonGridNodeIndex SplitBeginIndexA;
 		FAIAssist_DungeonGridNodeIndex SplitEndIndexA;
 		FAIAssist_DungeonGridNodeIndex SplitBeginIndexB;
 		FAIAssist_DungeonGridNodeIndex SplitEndIndexB;
-		bool bSplitX = GridSpaceLenX > GridSpaceLenY;
-		if (GridSpaceLenX == GridSpaceLenY)
+
+		//xで分割するか、yで分割するか
+		bool bSplitX = false;
+		if(GridSpaceLenY < PossibleSplitSpaceLen)
+		{
+			bSplitX = true;
+		}
+		else if (GridSpaceLenX < PossibleSplitSpaceLen)
+		{
+			bSplitX = false;
+		}
+		else
 		{
 			bSplitX = FMath::RandRange(0, 100) % 2 == 0;
 		}
-		//const bool bSplitX = FMath::RandRange(0, GridSpaceLenX + GridSpaceLenY) < GridSpaceLenX;
+
 		if (bSplitX)
 		{
 			const int32 SplitMin = mGridSpaceLenMin;
@@ -122,8 +149,12 @@ void AAIAssist_DungeonMaker::GenerateGridSpace()
 			SplitEndIndexA.mX = SplitX;
 
 			SplitBeginIndexB = GridSpace.mBeginIndex;
-			SplitBeginIndexB.mX = SplitX;
+			SplitBeginIndexB.mX = SplitX + 1;
 			SplitEndIndexB = GridSpace.mEndIndex;
+
+#if !UE_BUILD_SHIPPING
+			DebugLogString += FString::Printf(TEXT("   SplitX, %d\n"), SplitX);
+#endif
 		}
 		else
 		{
@@ -136,8 +167,12 @@ void AAIAssist_DungeonMaker::GenerateGridSpace()
 			SplitEndIndexA.mY = SplitY;
 
 			SplitBeginIndexB = GridSpace.mBeginIndex;
-			SplitBeginIndexB.mY = SplitY;
+			SplitBeginIndexB.mY = SplitY + 1;
 			SplitEndIndexB = GridSpace.mEndIndex;
+
+#if !UE_BUILD_SHIPPING
+			DebugLogString += FString::Printf(TEXT("   SplitY, %d\n"), SplitY);
+#endif
 		}
 
 		// 元のGridSpaceを消して、分割したSpaceを追加
@@ -150,6 +185,10 @@ void AAIAssist_DungeonMaker::GenerateGridSpace()
 	{
 		mGridSpaceList[i].mIndex = i;
 	}
+
+#if !UE_BUILD_SHIPPING
+	UE_LOG(LogTemp, Log, TEXT("%s"), *DebugLogString);
+#endif
 }
 
 //各GridNodeに所属するGridSpaceのIndexを設定
@@ -187,16 +226,17 @@ void AAIAssist_DungeonMaker::GenerateRoom(const FAIAssist_DungeonGridSpace& InGr
 	FAIAssist_DungeonGridNodeIndex EndIndex = InGridSpace.mEndIndex;
 	const int32 GridSpaceLenX = InGridSpace.mEndIndex.mX - InGridSpace.mBeginIndex.mX;
 	const int32 GridSpaceLenY = InGridSpace.mEndIndex.mY - InGridSpace.mBeginIndex.mY;
+	//const int32 NeedSpaceLen = (mGridRoomSpaceOffsetMin * 2) + mGridRoomLenMin;
 	if (GridSpaceLenX > mGridRoomLenMin)
 	{
 		int32 OffsetXMax = GridSpaceLenX - mGridRoomLenMin;
-		const int32 OffsetBeginX = FMath::RandRange(1,OffsetXMax-1);
+		const int32 OffsetBeginX = FMath::RandRange(mGridRoomSpaceOffsetMin, OffsetXMax - mGridRoomSpaceOffsetMin);
 		BeginIndex.mX += OffsetBeginX;
 
 		OffsetXMax -= OffsetBeginX;
 		if (OffsetXMax > 0)
 		{
-			const int32 OffsetEndX = FMath::RandRange(1, OffsetXMax-1);
+			const int32 OffsetEndX = FMath::RandRange(mGridRoomSpaceOffsetMin, OffsetXMax);
 			EndIndex.mX -= OffsetEndX;
 		}
 	}
@@ -204,13 +244,13 @@ void AAIAssist_DungeonMaker::GenerateRoom(const FAIAssist_DungeonGridSpace& InGr
 	if( GridSpaceLenY > mGridRoomLenMin)
 	{
 		int32 OffsetYMax = GridSpaceLenY - mGridRoomLenMin;
-		const int32 OffsetBeginY = FMath::RandRange(1, OffsetYMax-1);
+		const int32 OffsetBeginY = FMath::RandRange(mGridRoomSpaceOffsetMin, OffsetYMax - mGridRoomSpaceOffsetMin);
 		BeginIndex.mY += OffsetBeginY;
 
 		OffsetYMax -= OffsetBeginY;
 		if (OffsetYMax > 0)
 		{
-			const int32 OffsetEndY = FMath::RandRange(1, OffsetYMax-1);
+			const int32 OffsetEndY = FMath::RandRange(mGridRoomSpaceOffsetMin, OffsetYMax);
 			EndIndex.mY -= OffsetEndY;
 		}
 	}
@@ -225,9 +265,9 @@ void AAIAssist_DungeonMaker::AssignGridRoom()
 {
 	for (const FAIAssist_DungeonRoom& Room : mRoomList)
 	{
-		for (int32 x = Room.mBeginIndex.mX; x < Room.mEndIndex.mX; ++x)
+		for (int32 x = Room.mBeginIndex.mX; x <= Room.mEndIndex.mX; ++x)
 		{
-			for (int32 y = Room.mBeginIndex.mY; y < Room.mEndIndex.mY; ++y)
+			for (int32 y = Room.mBeginIndex.mY; y <= Room.mEndIndex.mY; ++y)
 			{
 				if (FAIAssist_DungeonGridNode* GridNode = GetGridNode(x, y))
 				{
@@ -252,9 +292,6 @@ void AAIAssist_DungeonMaker::SetupRoadGridSpace()
 
 void AAIAssist_DungeonMaker::SetupRoadGridSpace(FAIAssist_DungeonRoom& InRoom)
 {
-	//Roomの各辺からGridSpaceの端まで道にする
-	const FAIAssist_DungeonGridSpace& GridSpace = mGridSpaceList[InRoom.mGridSpaceIndex];
-
 	//+X
 	SetupRoadGridSpaceX(InRoom, true);
 	//-X
@@ -271,50 +308,49 @@ void AAIAssist_DungeonMaker::SetupRoadGridSpaceX(FAIAssist_DungeonRoom& InRoom, 
 	const FAIAssist_DungeonGridSpace& GridSpace = mGridSpaceList[InRoom.mGridSpaceIndex];
 
 	int32 RoomIndexX = InRoom.mEndIndex.mX;
-	int32 MinX = InRoom.mEndIndex.mX;
+	int32 MinX = InRoom.mEndIndex.mX +1;
 	int32 MaxX = GridSpace.mEndIndex.mX;
 	if (!bInPlusDirection)
 	{
 		RoomIndexX = InRoom.mBeginIndex.mX;
-		MaxX = InRoom.mBeginIndex.mX;
+		MaxX = InRoom.mBeginIndex.mX -1;
 		MinX = GridSpace.mBeginIndex.mX;
 	}
 
 	if (MinX == 0
-		|| MaxX >= mGridNodeXNum - 1)
+		|| MaxX >= mGridNodeXNum - 1
+		//|| MinX >= MaxX
+		)
 	{
 		return;
 	}
 
-	if (MinX < MaxX)
+	const int32 BeginY = InRoom.mBeginIndex.mY;
+	const int32 EndY = InRoom.mEndIndex.mY;
+	const int32 RoadY = FMath::RandRange(BeginY, EndY);
+
+	if (const FAIAssist_DungeonGridNode* GridNode = GetGridNode(RoomIndexX, RoadY))
 	{
-		const int32 BeginY = InRoom.mBeginIndex.mY;
-		const int32 EndY = InRoom.mEndIndex.mY - 1;
-		const int32 RoadY = FMath::RandRange(BeginY, EndY);
+		InRoom.mConnectRoadGridNodeUIDList.Add(GridNode->mUID);
+	}
 
-		if (const FAIAssist_DungeonGridNode* GridNode = GetGridNode(RoomIndexX, RoadY))
+	for (int32 x = MinX; x <= MaxX; ++x)
+	{
+		if (FAIAssist_DungeonGridNode* GridNode = GetGridNode(x, RoadY))
 		{
-			InRoom.mConnectRoadGridNodeUIDList.Add(GridNode->mUID);
-		}
-
-		for (int32 x = MinX; x < MaxX; ++x)
-		{
-			if (FAIAssist_DungeonGridNode* GridNode = GetGridNode(x, RoadY))
+			GridNode->mState = EAIAssist_DungeonGridState::Road;
+			if (bInPlusDirection)
 			{
-				GridNode->mState = EAIAssist_DungeonGridState::Road;
-				if (bInPlusDirection)
+				if (x == MaxX)
 				{
-					if (x == MaxX - 1)
-					{
-						mCheckConnectRoadYGridNodeList.Add(GridNode);
-					}
+					mCheckConnectRoadYGridNodeList.Add(GridNode);
 				}
-				else
+			}
+			else
+			{
+				if (x == MinX)
 				{
-					if (x == MinX)
-					{
-						mCheckConnectRoadYGridNodeList.Add(GridNode);
-					}
+					mCheckConnectRoadYGridNodeList.Add(GridNode);
 				}
 			}
 		}
@@ -326,50 +362,49 @@ void AAIAssist_DungeonMaker::SetupRoadGridSpaceY(FAIAssist_DungeonRoom& InRoom, 
 	const FAIAssist_DungeonGridSpace& GridSpace = mGridSpaceList[InRoom.mGridSpaceIndex];
 
 	int32 RoomIndexY = InRoom.mEndIndex.mY;
-	int32 MinY = InRoom.mEndIndex.mY;
+	int32 MinY = InRoom.mEndIndex.mY + 1;
 	int32 MaxY = GridSpace.mEndIndex.mY;
 	if (!bInPlusDirection)
 	{
 		RoomIndexY = InRoom.mBeginIndex.mY;
-		MaxY = InRoom.mBeginIndex.mY;
+		MaxY = InRoom.mBeginIndex.mY - 1;
 		MinY = GridSpace.mBeginIndex.mY;
 	}
 
 	if (MinY == 0
-		|| MaxY >= mGridNodeYNum - 1)
+		|| MaxY >= mGridNodeYNum - 1
+		//|| MinY >= MaxY
+		)
 	{
 		return;
 	}
 
-	if (MinY < MaxY)
+	const int32 BeginX = InRoom.mBeginIndex.mX;
+	const int32 EndX = InRoom.mEndIndex.mX;
+	const int32 RoadX = FMath::RandRange(BeginX, EndX);
+
+	if (const FAIAssist_DungeonGridNode* GridNode = GetGridNode(RoadX, RoomIndexY))
 	{
-		const int32 BeginX = InRoom.mBeginIndex.mX;
-		const int32 EndX = InRoom.mEndIndex.mX - 1;
-		const int32 RoadX = FMath::RandRange(BeginX, EndX);
+		InRoom.mConnectRoadGridNodeUIDList.Add(GridNode->mUID);
+	}
 
-		if (const FAIAssist_DungeonGridNode* GridNode = GetGridNode(RoadX, RoomIndexY))
+	for (int32 y = MinY; y <= MaxY; ++y)
+	{
+		if (FAIAssist_DungeonGridNode* GridNode = GetGridNode(RoadX, y))
 		{
-			InRoom.mConnectRoadGridNodeUIDList.Add(GridNode->mUID);
-		}
-
-		for (int32 y = MinY; y < MaxY; ++y)
-		{
-			if (FAIAssist_DungeonGridNode* GridNode = GetGridNode(RoadX, y))
+			GridNode->mState = EAIAssist_DungeonGridState::Road;
+			if (bInPlusDirection)
 			{
-				GridNode->mState = EAIAssist_DungeonGridState::Road;
-				if (bInPlusDirection)
+				if (y == MaxY)
 				{
-					if (y == MaxY - 1)
-					{
-						mCheckConnectRoadXGridNodeList.Add(GridNode);
-					}
+					mCheckConnectRoadXGridNodeList.Add(GridNode);
 				}
-				else
+			}
+			else
+			{
+				if (y == MinY)
 				{
-					if (y == MinY)
-					{
-						mCheckConnectRoadXGridNodeList.Add(GridNode);
-					}
+					mCheckConnectRoadXGridNodeList.Add(GridNode);
 				}
 			}
 		}
@@ -618,6 +653,106 @@ void AAIAssist_DungeonMaker::SetupRoadList(const int32 InBaseGridNodeUID)
 	mRoadList.Add(DungeonRoad);
 }
 
+void AAIAssist_DungeonMaker::SetupGridWallFlag()
+{
+	for (FAIAssist_DungeonGridNode& GridNode : mGridNodeList)
+	{
+		if (GridNode.mState == EAIAssist_DungeonGridState::Road
+			|| GridNode.mState == EAIAssist_DungeonGridState::Room)
+		{
+			SetupGridWallFlag(GridNode);
+		}
+	}
+}
+
+void AAIAssist_DungeonMaker::SetupGridWallFlag(FAIAssist_DungeonGridNode& InGridNode)
+{
+	int32 GridIndexX = INDEX_NONE;
+	int32 GridIndexY = INDEX_NONE;
+	if (!CalcGridNodeXY(GridIndexX, GridIndexY, InGridNode.mUID))
+	{
+		return;
+	}
+
+	InGridNode.mWallFlag.mbFront = !IsFloorGrid(GridIndexX + 1, GridIndexY);
+	InGridNode.mWallFlag.mbBack = !IsFloorGrid(GridIndexX - 1, GridIndexY);
+	InGridNode.mWallFlag.mbRight = !IsFloorGrid(GridIndexX, GridIndexY + 1);
+	InGridNode.mWallFlag.mbLeft = !IsFloorGrid(GridIndexX, GridIndexY - 1);
+}
+
+void AAIAssist_DungeonMaker::CreateStage()
+{
+	const FVector FloorSizeV(mGridNodeLength, mGridNodeLength, 1.f);
+	const FVector FloorScaleV(FloorSizeV.X * 0.01f, FloorSizeV.Y * 0.01f, 1.f);//1辺が100cm想定なので
+	
+	const FVector WallBaseOffsetV(mGridNodeLength * 0.5f, 0.f, mWallLength * 0.5f);
+	const FVector WallScaleV(mWallLength * 0.01f, mGridNodeLength * 0.01f, 1.f);//元が回転してるので
+
+	for (FAIAssist_DungeonGridNode& GridNode : mGridNodeList)
+	{
+		if (GridNode.mState != EAIAssist_DungeonGridState::Road
+			&& GridNode.mState != EAIAssist_DungeonGridState::Room)
+		{
+			continue;
+		}
+		int32 GridIndexX = INDEX_NONE;
+		int32 GridIndexY = INDEX_NONE;
+		if (!CalcGridNodeXY(GridIndexX, GridIndexY, GridNode.mUID))
+		{
+			return;
+		}
+
+		const FVector FloorCenterPos = CalcGridCenterPos(GridIndexX, GridIndexY);
+		const FTransform FloorTransform(FQuat::Identity, FloorCenterPos, FloorScaleV);
+		CreateFloorActor(FloorTransform);
+
+		if (GridNode.mWallFlag.mbFront)
+		{
+			const FRotator WallRot(0.f,0.f,0.f);
+			const FVector WallPos = FloorCenterPos + WallRot.RotateVector(WallBaseOffsetV);
+			const FTransform WallTransform(WallRot.Quaternion(), WallPos, WallScaleV);
+			CreateWallActor(WallTransform);
+		}
+		if (GridNode.mWallFlag.mbBack)
+		{
+			const FRotator WallRot(0.f, 180.f, 0.f);
+			const FVector WallPos = FloorCenterPos + WallRot.RotateVector(WallBaseOffsetV);
+			const FTransform WallTransform(WallRot.Quaternion(), WallPos, WallScaleV);
+			CreateWallActor(WallTransform);
+		}
+		if (GridNode.mWallFlag.mbRight)
+		{
+			const FRotator WallRot(0.f, 90.f, 0.f);
+			const FVector WallPos = FloorCenterPos + WallRot.RotateVector(WallBaseOffsetV);
+			const FTransform WallTransform(WallRot.Quaternion(), WallPos, WallScaleV);
+			CreateWallActor(WallTransform);
+		}
+		if (GridNode.mWallFlag.mbLeft)
+		{
+			const FRotator WallRot(0.f, -90.f, 0.f);
+			const FVector WallPos = FloorCenterPos + WallRot.RotateVector(WallBaseOffsetV);
+			const FTransform WallTransform(WallRot.Quaternion(), WallPos, WallScaleV);
+			CreateWallActor(WallTransform);
+		}
+	}
+}
+
+bool AAIAssist_DungeonMaker::IsFloorGrid(const int32 InX, const int32 InY) const
+{
+	const FAIAssist_DungeonGridNode* GridNode = GetGridNode(InX, InY);
+	if (GridNode == nullptr)
+	{
+		return false;
+	}
+	
+	if(GridNode->mState == EAIAssist_DungeonGridState::Road
+		|| GridNode->mState == EAIAssist_DungeonGridState::Room)
+	{
+		return true;
+	}
+	return false;
+}
+
 bool AAIAssist_DungeonMaker::CheckAddRoadList(FAIAssist_DungeonRoad& OutRoad, const int32 InCheckIndexX, const int32 InCheckIndexY)
 {
 	if (FAIAssist_DungeonGridNode* OffsetGridNode = GetGridNode(InCheckIndexX, InCheckIndexY))
@@ -632,240 +767,6 @@ bool AAIAssist_DungeonMaker::CheckAddRoadList(FAIAssist_DungeonRoad& OutRoad, co
 		}
 	}
 	return false;
-}
-
-//部屋を構成するActorを生成
-void AAIAssist_DungeonMaker::GenerateRoomActor()
-{
-	TSubclassOf<AActor> FloorActorClass = mFloorActorClass.LoadSynchronous();
-	if (FloorActorClass == nullptr)
-	{
-		return;
-	}
-
-	const FVector CenterPos = GetActorLocation();
-	const FVector ExtentV = FVector(static_cast<float>(mGridNodeXNum), static_cast<float>(mGridNodeYNum), 0.f) * mGridNodeLength * 0.5f;
-	const FVector BeginEdgePos = CenterPos - ExtentV;
-	const FVector GridCenterOffsetV = FVector(mGridNodeLength,mGridNodeLength,0.f)*0.5f;
-	for(const FAIAssist_DungeonRoom& Room : mRoomList)
-	{
-		const FVector RoomBeginEdgePos = BeginEdgePos
-			+ FVector(static_cast<float>(Room.mBeginIndex.mX)*mGridNodeLength, static_cast<float>(Room.mBeginIndex.mY) * mGridNodeLength, 0.f);
-		const FVector RoomEndEdgePos = BeginEdgePos
-			+ FVector(static_cast<float>(Room.mEndIndex.mX) * mGridNodeLength, static_cast<float>(Room.mEndIndex.mY) * mGridNodeLength, 0.f);
-		const FVector FloorCenterPos = (RoomBeginEdgePos + RoomEndEdgePos)*0.5f;
-		const FVector FloorSizeV(RoomEndEdgePos - RoomBeginEdgePos);
-		const FVector FloorScaleV(FloorSizeV.X*0.01f, FloorSizeV.Y*0.01f, 1.f);//1辺が100cm想定なので
-		const FTransform FloorTransform(FQuat::Identity, FloorCenterPos, FloorScaleV);
-		CreateFloorActor(FloorTransform);
-
-		//各辺の壁をチェック
-		GenerateRoomWallX(Room, true);
-		GenerateRoomWallX(Room, false);
-		GenerateRoomWallY(Room, true);
-		GenerateRoomWallY(Room, false);
-	}
-}
-
-//指定Roomの+X,-Xの辺の壁を生成
-void AAIAssist_DungeonMaker::GenerateRoomWallX(const FAIAssist_DungeonRoom& InRoom, bool bInPlusDirection)
-{
-	const FVector CenterPos = GetActorLocation();
-	const FVector ExtentV = FVector(static_cast<float>(mGridNodeXNum), static_cast<float>(mGridNodeYNum), 0.f) * mGridNodeLength * 0.5f;
-	const FVector BeginEdgePos = CenterPos - ExtentV;
-	const FVector GridCenterOffsetV = FVector(mGridNodeLength, mGridNodeLength, 0.f) * 0.5f;
-
-	FVector OffsetWallPos = FVector(-mGridNodeLength * 0.5f, 0.f, mWallLength * 0.5f);
-	int32 CheckIndexX = InRoom.mEndIndex.mX;
-	if (!bInPlusDirection)
-	{
-		OffsetWallPos = FVector(mGridNodeLength * 0.5f, 0.f, mWallLength * 0.5f);
-		CheckIndexX = InRoom.mBeginIndex.mX - 1;
-	}
-
-	const int32 BeginIndexY = InRoom.mBeginIndex.mY;
-	const int32 EndIndexY = InRoom.mEndIndex.mY;
-	for (int32 y = BeginIndexY; y < EndIndexY; ++y)
-	{
-		if (const FAIAssist_DungeonGridNode* GridNode = GetGridNode(CheckIndexX, y))
-		{
-			if (GridNode->mState == EAIAssist_DungeonGridState::Road)
-			{
-				continue;
-			}
-		}
-
-		const FVector GridEdgePos = BeginEdgePos
-			+ FVector(static_cast<float>(CheckIndexX) * mGridNodeLength, static_cast<float>(y) * mGridNodeLength, 0.f);
-		const FVector GridCenterPos = GridEdgePos + GridCenterOffsetV;
-		const FVector WallPos = GridCenterPos + OffsetWallPos;
-		const FVector WallScaleV(mGridNodeLength * 0.01f, mWallLength * 0.01f, 1.f);//元が回転してるのでYでいい
-		const FRotator WallRot(0.f, 90.f, 0.f);
-		const FTransform WallTransform(WallRot.Quaternion(), WallPos, WallScaleV);
-		CreateWallActor(WallTransform);
-	}
-}
-
-//指定Roomの+Y,-Yの辺の壁を生成
-void AAIAssist_DungeonMaker::GenerateRoomWallY(const FAIAssist_DungeonRoom& InRoom, bool bInPlusDirection)
-{
-	const FVector CenterPos = GetActorLocation();
-	const FVector ExtentV = FVector(static_cast<float>(mGridNodeXNum), static_cast<float>(mGridNodeYNum), 0.f) * mGridNodeLength * 0.5f;
-	const FVector BeginEdgePos = CenterPos - ExtentV;
-	const FVector GridCenterOffsetV = FVector(mGridNodeLength, mGridNodeLength, 0.f) * 0.5f;
-
-	FVector OffsetWallPos = FVector(0.f, -mGridNodeLength * 0.5f, mWallLength * 0.5f);
-	int32 CheckIndexY = InRoom.mEndIndex.mY;
-	if (!bInPlusDirection)
-	{
-		OffsetWallPos = FVector(0.f, mGridNodeLength * 0.5f, mWallLength * 0.5f);
-		CheckIndexY = InRoom.mBeginIndex.mY - 1;
-	}
-
-	const int32 BeginIndexX = InRoom.mBeginIndex.mX;
-	const int32 EndIndexX = InRoom.mEndIndex.mX;
-	for (int32 x = BeginIndexX; x < EndIndexX; ++x)
-	{
-		if (const FAIAssist_DungeonGridNode* GridNode = GetGridNode(x, CheckIndexY))
-		{
-			if (GridNode->mState == EAIAssist_DungeonGridState::Road)
-			{
-				continue;
-			}
-		}
-
-		const FVector GridEdgePos = BeginEdgePos
-			+ FVector(static_cast<float>(x) * mGridNodeLength, static_cast<float>(CheckIndexY) * mGridNodeLength, 0.f);
-		const FVector GridCenterPos = GridEdgePos + GridCenterOffsetV;
-		const FVector WallPos = GridCenterPos + OffsetWallPos;
-		const FVector WallScaleV(mGridNodeLength * 0.01f, mWallLength * 0.01f, 1.f);//元が回転してるのでYでいい
-		const FRotator WallRot(0.f, 0.f, 0.f);
-		const FTransform WallTransform(WallRot.Quaternion(), WallPos, WallScaleV);
-		CreateWallActor(WallTransform);
-	}
-}
-
-void AAIAssist_DungeonMaker::GenerateRoadActor()
-{
-	const FVector CenterPos = GetActorLocation();
-	const FVector ExtentV = FVector(static_cast<float>(mGridNodeXNum), static_cast<float>(mGridNodeYNum), 0.f) * mGridNodeLength * 0.5f;
-	const FVector BeginEdgePos = CenterPos - ExtentV;
-	const FVector GridCenterOffsetV = FVector(mGridNodeLength, mGridNodeLength, 0.f) * 0.5f;
-	for (const FAIAssist_DungeonRoad& DungeonRoad : mRoadList)
-	{
-		const int32 RoadNum = DungeonRoad.mGridNodeUIDList.Num();
-		for (int32 i=0; i< RoadNum; ++i)
-		{
-			const int32 GridNodeUID = DungeonRoad.mGridNodeUIDList[i];
-			int32 GridIndexX = INDEX_NONE;
-			int32 GridIndexY = INDEX_NONE;
-			if (!CalcGridNodeXY(GridIndexX, GridIndexY, GridNodeUID))
-			{
-				continue;
-			}
-
-			const FVector GridEdgePos = BeginEdgePos
-				+ FVector(static_cast<float>(GridIndexX) * mGridNodeLength, static_cast<float>(GridIndexY) * mGridNodeLength, 0.f);
-			const FVector GridCenterPos = GridEdgePos + GridCenterOffsetV;
-			const FVector ScaleV(mGridNodeLength * 0.01f, mGridNodeLength * 0.01f, 1.f);//1辺が100cm想定なので
-			FTransform SpawnTransform(FQuat::Identity, GridCenterPos, ScaleV);
-			CreateFloorActor(SpawnTransform);
-
-			const bool bEdgeRoadNode = ( i==0 || i== RoadNum-1);
-			GenerateRoadWall(GridNodeUID, bEdgeRoadNode);
-		}
-	}
-}
-
-void AAIAssist_DungeonMaker::GenerateRoadWall(const int32 InGridNodeUID, const bool bInEdgeRoadNode)
-{
-	int32 GridIndexX = INDEX_NONE;
-	int32 GridIndexY = INDEX_NONE;
-	if (!CalcGridNodeXY(GridIndexX, GridIndexY, InGridNodeUID))
-	{
-		return;
-	}
-
-	const FVector CenterPos = GetActorLocation();
-	const FVector ExtentV = FVector(static_cast<float>(mGridNodeXNum), static_cast<float>(mGridNodeYNum), 0.f) * mGridNodeLength * 0.5f;
-	const FVector BeginEdgePos = CenterPos - ExtentV;
-	const FVector GridCenterOffsetV = FVector(mGridNodeLength, mGridNodeLength, 0.f) * 0.5f;
-
-	//壁が必要なGridかどうか
-	auto IsNeedWall = [&](const int32 InIndexX, const int32 InIndexY)
-	{
-		if (const FAIAssist_DungeonGridNode* GridNode = GetGridNode(InIndexX, InIndexY))
-		{
-			if (bInEdgeRoadNode)
-			{
-				if (GridNode->mState != EAIAssist_DungeonGridState::Road
-					&& GridNode->mState != EAIAssist_DungeonGridState::Room)
-				{
-					return true;
-				}
-			}
-			else if (GridNode->mState != EAIAssist_DungeonGridState::Road)
-			{
-				return true;
-			}
-		}
-		else
-		{
-			return true;
-		}
-		return false;
-	};
-
-	//+x,-x方向に壁が必要なら作成
-	auto CheckXWall = [&](const bool bInPlusDirection)
-	{
-		int32 CheckIndexX = GridIndexX + 1;
-		FVector OffsetWallPos(mGridNodeLength * 0.5f, 0.f, mWallLength * 0.5f);
-		if (!bInPlusDirection)
-		{
-			CheckIndexX = GridIndexX -1;
-			OffsetWallPos = FVector(-mGridNodeLength * 0.5f, 0.f, mWallLength * 0.5f);
-		}
-		if (IsNeedWall(CheckIndexX, GridIndexY))
-		{
-			const FVector GridEdgePos = BeginEdgePos
-				+ FVector(static_cast<float>(GridIndexX) * mGridNodeLength, static_cast<float>(GridIndexY) * mGridNodeLength, 0.f);
-			const FVector GridCenterPos = GridEdgePos + GridCenterOffsetV;
-			const FVector WallPos = GridCenterPos + OffsetWallPos;
-			const FVector WallScaleV(mGridNodeLength * 0.01f, mWallLength * 0.01f, 1.f);//元が回転してるのでYでいい
-			const FRotator WallRot(0.f, 90.f, 0.f);
-			const FTransform WallTransform(WallRot.Quaternion(), WallPos, WallScaleV);
-			CreateWallActor(WallTransform);
-		}
-	};
-
-	//+y,-y方向に壁が必要なら作成
-	auto CheckYWall = [&](const bool bInPlusDirection)
-	{
-		int32 CheckIndexY = GridIndexY + 1;
-		FVector OffsetWallPos(0.f, mGridNodeLength * 0.5f, mWallLength * 0.5f);
-		if (!bInPlusDirection)
-		{
-			CheckIndexY = GridIndexY - 1;
-			OffsetWallPos = FVector(0.f, -mGridNodeLength * 0.5f, mWallLength * 0.5f);
-		}
-		if (IsNeedWall(GridIndexX, CheckIndexY))
-		{
-			const FVector GridEdgePos = BeginEdgePos
-				+ FVector(static_cast<float>(GridIndexX) * mGridNodeLength, static_cast<float>(GridIndexY) * mGridNodeLength, 0.f);
-			const FVector GridCenterPos = GridEdgePos + GridCenterOffsetV;
-			const FVector WallPos = GridCenterPos + OffsetWallPos;
-			const FVector WallScaleV(mGridNodeLength * 0.01f, mWallLength * 0.01f, 1.f);//元が回転してるのでYでいい
-			const FRotator WallRot(0.f, 0.f, 0.f);
-			const FTransform WallTransform(WallRot.Quaternion(), WallPos, WallScaleV);
-			CreateWallActor(WallTransform);
-		}
-	};
-	
-	CheckXWall(true);
-	CheckXWall(false);
-	CheckYWall(true);
-	CheckYWall(false);
 }
 
 //床のActor生成
@@ -966,12 +867,36 @@ FAIAssist_DungeonGridNode* AAIAssist_DungeonMaker::GetGridNode(const int32 InX, 
 	}
 	return nullptr;
 }
-
-// Called every frame
-void AAIAssist_DungeonMaker::Tick(float DeltaTime)
+const FAIAssist_DungeonGridNode* AAIAssist_DungeonMaker::GetGridNode(const int32 InX, const int32 InY) const
 {
-	Super::Tick(DeltaTime);
+	const int32 GridNodeUID = CalcGridNodeUID(InX, InY);
+	if (GridNodeUID != INDEX_NONE
+		&& GridNodeUID >= 0
+		&& GridNodeUID < mGridNodeXNum * mGridNodeYNum)
+	{
+		return &mGridNodeList[GridNodeUID];
+	}
+	return nullptr;
+}
 
+FVector AAIAssist_DungeonMaker::CalcDungeonExtentV() const
+{
+	return FVector(static_cast<float>(mGridNodeXNum), static_cast<float>(mGridNodeYNum), 0.f) * mGridNodeLength * 0.5f;
+}
+FVector AAIAssist_DungeonMaker::CalcDungeonBeginEdgePos() const
+{
+	const FVector CenterPos = GetActorLocation();
+	return CenterPos - CalcDungeonExtentV();
+}
+FVector AAIAssist_DungeonMaker::CalcGridEdgePos(const int32 InX, const int32 InY) const
+{
+	return CalcDungeonBeginEdgePos()
+		+ FVector(static_cast<float>(InX) * mGridNodeLength, static_cast<float>(InY) * mGridNodeLength, 0.f);
+}
+FVector AAIAssist_DungeonMaker::CalcGridCenterPos(const int32 InX, const int32 InY) const
+{
+	const FVector GridCenterOffsetV = FVector(mGridNodeLength, mGridNodeLength, 0.f) * 0.5f;
+	return CalcGridEdgePos(InX, InY) + GridCenterOffsetV;
 }
 
 #if UE_BUILD_DEVELOPMENT
@@ -1076,10 +1001,10 @@ void AAIAssist_DungeonMaker::DebugDraw2DMap(UCanvas* InCanvas)
 		for(const FAIAssist_DungeonGridSpace& GridSpace : mGridSpaceList)
 		{
 			const FVector2D BeginPos(static_cast<float>(GridSpace.mBeginIndex.mX) * GridDispLenX, static_cast<float>(GridSpace.mBeginIndex.mY) * GridDispLenY);
-			const FVector2D EndPos(static_cast<float>(GridSpace.mEndIndex.mX) * GridDispLenX, static_cast<float>(GridSpace.mEndIndex.mY) * GridDispLenY);
+			const FVector2D EndPos(static_cast<float>(GridSpace.mEndIndex.mX + 1) * GridDispLenX, static_cast<float>(GridSpace.mEndIndex.mY + 1) * GridDispLenY);
 			const FVector2D CenterPos = (BeginPos+EndPos)*0.5f;
 			const FVector2D ExtenetV = EndPos - CenterPos - FVector2D(GridDispInsideLen, GridDispInsideLen);
-			DrawCanvasQuadrangle(InCanvas, CenterPos+GridDispBasePos, ExtenetV, SpaceColor[SpaceIndex%SpaceColorNum]);
+			DebugDrawCanvasQuadrangle(InCanvas, CenterPos+GridDispBasePos, ExtenetV, SpaceColor[SpaceIndex%SpaceColorNum]);
 			++SpaceIndex;
 		}
 	}
@@ -1118,7 +1043,7 @@ void AAIAssist_DungeonMaker::DebugDraw2DMap(UCanvas* InCanvas)
 				FVector2D CenterPos(static_cast<float>(x)*GridDispLenX, static_cast<float>(y) * GridDispLenY);
 				CenterPos += GridDispExtent;
 				CenterPos += GridDispBasePos;
-				DrawCanvasQuadrangle(InCanvas, CenterPos, GridDispExtent, GridNodeColor);
+				DebugDrawCanvasQuadrangle(InCanvas, CenterPos, GridDispExtent, GridNodeColor);
 				++Index;
 			}
 		}
@@ -1146,6 +1071,10 @@ void AAIAssist_DungeonMaker::DebugDraw3DMap(UCanvas* InCanvas)
 	const FVector GridDrawExtentV = FVector(mGridNodeLength, mGridNodeLength, mGridNodeLength) * 0.5f - FVector(3.f,3.f,3.f);
 	for (const FAIAssist_DungeonGridNode& GridNode : mGridNodeList)
 	{
+		if (GridNode.mState == EAIAssist_DungeonGridState::Space)
+		{
+			continue;
+		}
 		int32 GridIndexX = INDEX_NONE;
 		int32 GridIndexY = INDEX_NONE;
 		if (!CalcGridNodeXY(GridIndexX, GridIndexY, GridNode.mUID))
@@ -1157,24 +1086,42 @@ void AAIAssist_DungeonMaker::DebugDraw3DMap(UCanvas* InCanvas)
 			+ FVector(static_cast<float>(GridIndexX) * mGridNodeLength, static_cast<float>(GridIndexY) * mGridNodeLength, 0.f);
 		const FVector GridCenterPos = GridEdgePos + GridCenterOffsetV;
 
-		FColor GridNodeColor = FColor::White;
+		float Thickness = 2.f;
+		FColor GridNodeColor = FColor::Silver;
 		switch (GridNode.mState)
 		{
 		case EAIAssist_DungeonGridState::Space:
-			GridNodeColor = FColor::Silver;
-			break;
-		case EAIAssist_DungeonGridState::Road:
 			GridNodeColor = FColor::Black;
+			Thickness = 0.f;
 			break;
-		default:
+		case EAIAssist_DungeonGridState::Room:
 			GridNodeColor = SpaceColor[GridNode.mGridSpaceIndex % SpaceColorNum];
 			break;
+		case EAIAssist_DungeonGridState::Road:
+			GridNodeColor = FColor::White;
+			break;
+		default:
+			break;
 		}
-		DrawDebugBox(GetWorld(), GridCenterPos, GridDrawExtentV, GridNodeColor, false, -1.f, 0, 2.f);
+		DrawDebugBox(GetWorld(), GridCenterPos, GridDrawExtentV, GridNodeColor, false, -1.f, 0, Thickness);
+
+#if USE_CSDEBUG
+		FCSDebugInfoWindowText WindowText;
+		WindowText.SetWindowName(FString::Printf(TEXT("%d, %d"), GridIndexX, GridIndexY));
+		WindowText.AddText(FString::Printf(TEXT("mUID : %d"), GridNode.mUID));
+		WindowText.AddText(FString::Printf(TEXT("mGridSpaceIndex : %d"), GridNode.mGridSpaceIndex));
+		WindowText.AddText(FString::Printf(TEXT("mRoadIndex : %d"), GridNode.mRoadIndex));
+		WindowText.AddText(FString::Printf(TEXT("mState : %s"), *DebugGetGridStateString(GridNode.mState)));
+		WindowText.AddText(FString::Printf(TEXT("WallFront : %d"), GridNode.mWallFlag.mbFront));
+		WindowText.AddText(FString::Printf(TEXT("WallBack : %d"), GridNode.mWallFlag.mbBack));
+		WindowText.AddText(FString::Printf(TEXT("WallRight : %d"), GridNode.mWallFlag.mbRight));
+		WindowText.AddText(FString::Printf(TEXT("WallLeft : %d"), GridNode.mWallFlag.mbLeft));
+		WindowText.Draw(InCanvas, GridCenterPos, 500.f);
+#endif
 	}
 }
 
-void	AAIAssist_DungeonMaker::DrawCanvasQuadrangle(UCanvas* InCanvas, const FVector2D& InCenterPos, const FVector2D& InExtent, const FLinearColor InColor)
+void	AAIAssist_DungeonMaker::DebugDrawCanvasQuadrangle(UCanvas* InCanvas, const FVector2D& InCenterPos, const FVector2D& InExtent, const FLinearColor InColor)
 {
 	const uint32 PointListSize = 4;
 	const FVector2D PointList[PointListSize] = {
@@ -1188,6 +1135,24 @@ void	AAIAssist_DungeonMaker::DrawCanvasQuadrangle(UCanvas* InCanvas, const FVect
 		DrawDebugCanvas2DLine(InCanvas, PointList[i], PointList[(i + 1) % PointListSize], InColor);
 	}
 }
+
+FString AAIAssist_DungeonMaker::DebugGetGridStateString(const EAIAssist_DungeonGridState InState) const
+{
+	static TMap<EAIAssist_DungeonGridState, FString> sGridStateStringMap;
+	if (sGridStateStringMap.Num() == 0)
+	{
+		sGridStateStringMap.Add(EAIAssist_DungeonGridState::Space, FString(TEXT("Space")));
+		sGridStateStringMap.Add(EAIAssist_DungeonGridState::Room, FString(TEXT("Room")));
+		sGridStateStringMap.Add(EAIAssist_DungeonGridState::Road, FString(TEXT("Road")));
+	}
+
+	if (const FString* String = sGridStateStringMap.Find(InState))
+	{
+		return *String;
+	}
+	return FString(TEXT("Unknown"));
+}
+
 #endif
 
 void AAIAssist_DungeonMaker::EditorClearDungeon()
